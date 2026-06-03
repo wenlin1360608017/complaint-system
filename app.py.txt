@@ -1,0 +1,222 @@
+import streamlit as st
+import pandas as pd
+from datetime import datetime
+import io
+
+# ============ 页面配置 ============
+st.set_page_config(page_title="投诉数据整合系统", layout="wide")
+st.title("📊 智能投诉数据整合与核算系统")
+
+# ============ 初始化Session State ============
+if 'operator_data' not in st.session_state:
+    st.session_state.operator_data = None
+if 'data12321' not in st.session_state:
+    st.session_state.data12321 = None
+if 'merged_data' not in st.session_state:
+    st.session_state.merged_data = None
+if 'rules' not in st.session_state:
+    # 默认规则
+    st.session_state.rules = [
+        {"id": 1, "field": "line", "operator": "contains", "value": "催收", "target_field": "abuse_type", "target_value": "欠款催收", "action": "invalid", "enabled": True},
+        {"id": 2, "field": "call_duration", "operator": "is_zero_or_empty", "value": "", "action": "invalid", "enabled": True},
+    ]
+
+# ============ 侧边栏：规则配置 ============
+st.sidebar.header("⚙️ 规则配置中心")
+st.sidebar.info("配置哪些投诉判定为无效")
+
+# 显示现有规则
+for i, rule in enumerate(st.session_state.rules):
+    with st.sidebar.expander(f"规则 {i+1}", expanded=True):
+        enabled = st.checkbox(f"启用", value=rule["enabled"], key=f"enable_{i}")
+        st.session_state.rules[i]["enabled"] = enabled
+        
+        field = st.selectbox(
+            "判定字段",
+            ["line", "abuse_type", "call_duration"],
+            index=["line", "abuse_type", "call_duration"].index(rule["field"]) if rule["field"] in ["line", "abuse_type", "call_duration"] else 0,
+            key=f"field_{i}"
+        )
+        st.session_state.rules[i]["field"] = field
+        
+        if field == "call_duration":
+            operator = st.selectbox("条件", ["is_zero_or_empty", "equals"], index=0 if rule["operator"] == "is_zero_or_empty" else 1, key=f"op_{i}")
+            st.session_state.rules[i]["operator"] = operator
+            if operator == "equals":
+                value = st.text_input("值", value=rule["value"], key=f"value_{i}")
+                st.session_state.rules[i]["value"] = value
+        else:
+            operator = st.selectbox("条件", ["contains", "equals"], index=0 if rule["operator"] == "contains" else 1, key=f"op_{i}")
+            st.session_state.rules[i]["operator"] = operator
+            value = st.text_input("值", value=rule["value"], key=f"value_{i}")
+            st.session_state.rules[i]["value"] = value
+        
+        if st.button("删除", key=f"del_{i}"):
+            st.session_state.rules.pop(i)
+            st.rerun()
+
+# 添加新规则按钮
+if st.sidebar.button("➕ 添加新规则"):
+    new_id = max([r["id"] for r in st.session_state.rules]) + 1 if st.session_state.rules else 1
+    st.session_state.rules.append({
+        "id": new_id, "field": "line", "operator": "contains", "value": "", "action": "invalid", "enabled": True
+    })
+    st.rerun()
+
+# ============ 主页面：文件上传 ============
+col1, col2 = st.columns(2)
+
+with col1:
+    st.subheader("📤 上传运营商回传数据")
+    operator_file = st.file_uploader("上传运营商Excel文件", type=["xls", "xlsx"], key="operator")
+    if operator_file:
+        df = pd.read_excel(operator_file)
+        # 标准化列名
+        df.columns = [c.strip() for c in df.columns]
+        st.session_state.operator_data = df
+        st.success(f"✅ 已上传 {len(df)} 条运营商数据")
+
+with col2:
+    st.subheader("📤 上传12321回传数据")
+    data12321_file = st.file_uploader("上传12321 Excel文件", type=["xls", "xlsx"], key="data12321")
+    if data12321_file:
+        df = pd.read_excel(data12321_file)
+        df.columns = [c.strip() for c in df.columns]
+        st.session_state.data12321 = df
+        st.success(f"✅ 已上传 {len(df)} 条12321数据")
+
+# ============ 数据处理按钮 ============
+if st.button("🚀 开始整合与核算", type="primary"):
+    if st.session_state.operator_data is None and st.session_state.data12321 is None:
+        st.error("请至少上传一个文件")
+    else:
+        # === 数据整合与去重 ===
+        operator_df = st.session_state.operator_data
+        data12321_df = st.session_state.data12321
+        
+        # 标准化字段名
+        if operator_df is not None:
+            operator_df = operator_df.rename(columns={
+                '被举报号码': 'report_number',
+                '投诉时间': 'report_time',
+                '项目': 'project',
+                '线路': 'line',
+                '不良类型': 'abuse_type',
+                '通话时长': 'call_duration'
+            })
+            operator_df['source'] = 'operator'
+        
+        if data12321_df is not None:
+            data12321_df = data12321_df.rename(columns={
+                '被投诉号码': 'report_number',
+                '投诉时间': 'report_time',
+                '项目名称': 'project',
+                '线路名称': 'line'
+            })
+            data12321_df['source'] = '12321'
+            data12321_df['abuse_type'] = None
+            data12321_df['call_duration'] = None
+        
+        # 去重：以 投诉时间+号码 为键，运营商数据优先
+        dedup_dict = {}
+        
+        # 先加运营商数据
+        if operator_df is not None:
+            for _, row in operator_df.iterrows():
+                key = f"{row['report_time']}_{row['report_number']}"
+                dedup_dict[key] = row.to_dict()
+        
+        # 再加12321数据（仅当key不存在时）
+        if data12321_df is not None:
+            for _, row in data12321_df.iterrows():
+                key = f"{row['report_time']}_{row['report_number']}"
+                if key not in dedup_dict:
+                    dedup_dict[key] = row.to_dict()
+        
+        merged_df = pd.DataFrame(dedup_dict.values())
+        
+        # === 规则引擎判定有效性 ===
+        def is_valid(row, rules):
+            # 12321数据默认有效
+            if row.get('source') == '12321':
+                return True
+            
+            # 运营商数据逐条匹配规则
+            for rule in rules:
+                if not rule["enabled"]:
+                    continue
+                
+                field = rule["field"]
+                operator = rule["operator"]
+                value = rule["value"]
+                
+                row_value = row.get(field)
+                
+                # 判断是否匹配
+                matched = False
+                if operator == "contains":
+                    matched = value in str(row_value) if pd.notna(row_value) else False
+                elif operator == "equals":
+                    matched = str(row_value) == value
+                elif operator == "is_zero_or_empty":
+                    matched = pd.isna(row_value) or row_value == 0 or row_value == ""
+                
+                if matched:
+                    # 特殊处理：规则1需要同时匹配line和abuse_type
+                    if rule.get("target_field") and rule.get("target_value"):
+                        target_val = row.get(rule["target_field"])
+                        if rule["target_value"] in str(target_val) if pd.notna(target_val) else False:
+                            return False
+                    else:
+                        return False
+            
+            return True
+        
+        merged_df['is_valid'] = merged_df.apply(lambda row: is_valid(row, st.session_state.rules), axis=1)
+        
+        st.session_state.merged_data = merged_df
+        
+        st.success("✅ 数据整合与核算完成！")
+
+# ============ 结果展示 ============
+if st.session_state.merged_data is not None:
+    df = st.session_state.merged_data
+    
+    # 统计
+    total = len(df)
+    valid = df['is_valid'].sum()
+    invalid = total - valid
+    
+    st.subheader("📈 核算结果")
+    col1, col2, col3 = st.columns(3)
+    col1.metric("总投诉量（去重后）", total)
+    col2.metric("有效投诉量", valid)
+    col3.metric("无效投诉量", invalid)
+    
+    if total > 0:
+        st.metric("核减率", f"{invalid/total*100:.1f}%")
+    
+    # 数据预览
+    st.subheader("📋 数据详情")
+    display_df = df.copy()
+    display_df['投诉时间'] = display_df['report_time']
+    display_df['被举报号码'] = display_df['report_number']
+    display_df['项目'] = display_df['project']
+    display_df['线路'] = display_df['line']
+    display_df['来源'] = display_df['source']
+    display_df['是否有效'] = display_df['is_valid'].map({True: '✅ 有效', False: '❌ 无效'})
+    
+    st.dataframe(display_df[['投诉时间', '被举报号码', '项目', '线路', '来源', '是否有效']], use_container_width=True)
+    
+    # 导出按钮
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        display_df.to_excel(writer, index=False, sheet_name='核算结果')
+    processed_data = output.getvalue()
+    
+    st.download_button(
+        "💾 导出核算结果",
+        processed_data,
+        "投诉核算结果.xlsx",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
