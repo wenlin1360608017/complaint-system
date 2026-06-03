@@ -68,17 +68,16 @@ col1, col2 = st.columns(2)
 
 with col1:
     st.subheader("📤 上传运营商回传数据")
-    operator_file = st.file_uploader("上传运营商Excel文件", type=["xls", "xlsx"], key="operator")
+    # 修改了 key="upload_operator_widget"
+    operator_file = st.file_uploader("上传运营商Excel文件", type=["xls", "xlsx"], key="upload_operator_widget")
     if operator_file:
         df = pd.read_excel(operator_file)
-        # 标准化列名
-        df.columns = [c.strip() for c in df.columns]
-        st.session_state.operator_data = df
-        st.success(f"✅ 已上传 {len(df)} 条运营商数据")
+        # ...后续代码保持不变...
 
 with col2:
     st.subheader("📤 上传12321回传数据")
-    data12321_file = st.file_uploader("上传12321 Excel文件", type=["xls", "xlsx"], key="data12321")
+    # 记得这里也要改（如果还没改的话）
+    data12321_file = st.file_uploader("上传12321 Excel文件", type=["xls", "xlsx"], key="upload_12321_widget")
     if data12321_file:
         df = pd.read_excel(data12321_file)
         df.columns = [c.strip() for c in df.columns]
